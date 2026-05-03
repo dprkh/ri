@@ -14,12 +14,13 @@
     "noUnusedLocals": true,
     "noUnusedParameters": true,
     "noFallthroughCasesInSwitch": true,
-    "types": ["node"]
+    "types": ["node", "bun"]
   },
   "include": [
     "src/main.ts",
     "src/worker.ts",
     "scripts/prepare.ts",
+    "scripts/prepare-worker.ts",
     "scripts/site.ts",
     "scripts/verify.ts",
     "scripts/upload.ts"

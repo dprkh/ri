@@ -590,6 +590,7 @@ async function readReaderLayout() {
       const lastTranscriptBottom =
         lastTranscriptBlock instanceof HTMLElement ? lastTranscriptBlock.getBoundingClientRect().bottom : 0;
       const transportRect = document.querySelector(transportSelector)?.getBoundingClientRect();
+      const transcriptRect = transcript instanceof HTMLElement ? transcript.getBoundingClientRect() : null;
       const transcriptBlockRects = transcriptBlocks
         .filter((element) => element instanceof HTMLElement && element.offsetParent !== null)
         .map((element) => element.getBoundingClientRect());
@@ -601,6 +602,7 @@ async function readReaderLayout() {
       const themeColor = document.querySelector('meta[name="theme-color"]')?.getAttribute("content") ?? "";
       const htmlStyle = getComputedStyle(document.documentElement);
       const bodyStyle = getComputedStyle(document.body);
+      const transportWidthExtra = 10;
 
       return {
         bodyWidthFits: document.documentElement.scrollWidth <= window.innerWidth + 1,
@@ -621,6 +623,21 @@ async function readReaderLayout() {
         transcriptBlocksAreParagraphs: transcriptBlocks
           .filter((element) => element.getAttribute("data-kind") !== "heading")
           .every((element) => element.tagName === "P"),
+        transportExtendsBeyondArticleWidth: Boolean(
+          transcriptRect &&
+            transportRect &&
+            Math.abs(transcriptRect.left - transportRect.left - transportWidthExtra / 2) <= 1 &&
+            Math.abs(transportRect.right - transcriptRect.right - transportWidthExtra / 2) <= 1 &&
+            Math.abs(transportRect.width - transcriptRect.width - transportWidthExtra) <= 1,
+        ),
+        articleAndTransportBounds: {
+          articleLeft: transcriptRect?.left ?? 0,
+          articleRight: transcriptRect?.right ?? 0,
+          articleWidth: transcriptRect?.width ?? 0,
+          transportLeft: transportRect?.left ?? 0,
+          transportRight: transportRect?.right ?? 0,
+          transportWidth: transportRect?.width ?? 0,
+        },
         maxTranscriptBlockGap: Math.max(0, ...transcriptBlockGaps),
         transcriptClearsTransport: lastTranscriptBottom <= (transportRect?.top ?? 0) - 8,
         transportFloatsAboveBrowserChrome:
@@ -687,6 +704,11 @@ function assertReaderLayout(layout, viewport) {
   assert.equal(layout.transcriptArticleCount, 1, `transcript used multiple article elements at ${viewport.width}px`);
   assert.equal(layout.transcriptIsArticle, true, `transcript container was not an article at ${viewport.width}px`);
   assert.equal(layout.transcriptBlocksAreParagraphs, true, `transcript paragraphs used the wrong element at ${viewport.width}px`);
+  assert.equal(
+    layout.transportExtendsBeyondArticleWidth,
+    true,
+    `transport was not 10px wider than the article at ${viewport.width}px: ${JSON.stringify(layout.articleAndTransportBounds)}`,
+  );
   assert.equal(layout.maxTranscriptBlockGap <= 1, true, `transcript paragraph gap was too large at ${viewport.width}px`);
   assert.equal(layout.transcriptClearsTransport, true, `transport obscured transcript at ${viewport.width}px`);
   assert.equal(

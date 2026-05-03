@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { createReadStream, type BigIntStats } from "node:fs";
 import { copyFile, mkdir, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { availableParallelism } from "node:os";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
@@ -190,7 +191,69 @@ const PreparedChapterCacheSchema = z
   })
   .strict();
 
-const prepareScriptPath = fileURLToPath(import.meta.url);
+const PrepareChapterWorkerDataSchema = z
+  .object({
+    role: z.literal("prepare-chapter-worker"),
+    chapterIds: z.array(ChapterIdSchema).nonempty(),
+    prepareScriptHash: z.string().regex(sha256HashPattern),
+  })
+  .strict();
+
+const PrepareChapterWorkerInitSchema = z
+  .object({
+    type: z.literal("init"),
+    data: PrepareChapterWorkerDataSchema,
+  })
+  .strict();
+
+const PrepareChapterWorkerTaskSchema = z
+  .object({
+    type: z.literal("prepare-chapter"),
+    taskId: z.number().int().nonnegative(),
+    orderIndex: z.number().int().nonnegative(),
+    chapterId: ChapterIdSchema,
+  })
+  .strict();
+
+const PrepareChapterWorkerMessageSchema = z.discriminatedUnion("type", [
+  PrepareChapterWorkerInitSchema,
+  PrepareChapterWorkerTaskSchema,
+]);
+
+const PrepareChapterWorkerResultSchema = z.discriminatedUnion("type", [
+  z
+    .object({
+      type: z.literal("prepared-chapter"),
+      taskId: z.number().int().nonnegative(),
+      orderIndex: z.number().int().nonnegative(),
+      chapterId: ChapterIdSchema,
+      catalogChapter: CatalogChapterSchema,
+      statusLine: z.string().min(1),
+    })
+    .strict(),
+  z
+    .object({
+      type: z.literal("prepare-chapter-error"),
+      taskId: z.number().int().nonnegative(),
+      orderIndex: z.number().int().nonnegative(),
+      chapterId: ChapterIdSchema,
+      message: z.string().min(1),
+      stack: z.string().min(1).optional(),
+    })
+    .strict(),
+  z
+    .object({
+      type: z.literal("prepare-chapter-bootstrap-error"),
+      message: z.string().min(1),
+      stack: z.string().min(1).optional(),
+    })
+    .strict(),
+]);
+
+const prepareScriptFileUrl = new URL(import.meta.url);
+prepareScriptFileUrl.search = "";
+prepareScriptFileUrl.hash = "";
+const prepareScriptPath = fileURLToPath(prepareScriptFileUrl);
 const webRoot = resolve(dirname(prepareScriptPath), "..");
 const workspaceRoot = resolve(webRoot, "..");
 const publicDir = resolve(webRoot, "public");
@@ -222,6 +285,13 @@ const css = `
   --space-5: 20px;
   --space-6: 24px;
   --dock-reserve: 258px;
+  --reader-max-width: 820px;
+  --reader-inline-padding: 20px;
+  --article-max-width: calc(var(--reader-max-width) - var(--reader-inline-padding) - var(--reader-inline-padding));
+  --article-viewport-width: calc(100% - var(--reader-inline-padding) - var(--reader-inline-padding));
+  --transport-width-extra: 15px;
+  --transport-max-width: calc(var(--article-max-width) + var(--transport-width-extra));
+  --transport-viewport-width: calc(var(--article-viewport-width) + var(--transport-width-extra));
   --transport-gutter: 10px;
   font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "SF Pro Display", "Helvetica Neue", Arial, sans-serif;
 }
@@ -292,13 +362,13 @@ input:focus-visible {
 }
 
 .app {
-  width: min(100%, 820px);
+  width: min(100%, var(--reader-max-width));
   min-height: 100vh;
   min-height: 100dvh;
   margin: 0 auto;
   padding:
     max(22px, env(safe-area-inset-top))
-    20px
+    var(--reader-inline-padding)
     calc(var(--dock-reserve) + max(var(--transport-gutter), env(safe-area-inset-bottom)));
 }
 
@@ -374,9 +444,10 @@ input:focus-visible {
 
 .transport {
   position: fixed;
-  right: max(var(--transport-gutter), env(safe-area-inset-right));
+  width: min(var(--transport-viewport-width), var(--transport-max-width));
   bottom: max(var(--transport-gutter), env(safe-area-inset-bottom));
-  left: max(var(--transport-gutter), env(safe-area-inset-left));
+  left: 50%;
+  transform: translateX(-50%);
   z-index: 5;
   overflow: hidden;
   border: 1px solid var(--hairline);
@@ -1109,8 +1180,19 @@ input:focus-visible {
 }
 
 @media (max-width: 430px) {
+  .transport {
+    padding-right: var(--space-3);
+    padding-left: var(--space-3);
+  }
+
+  .chapter-nav {
+    gap: 6px;
+  }
+
   .chapter-current-button {
     grid-template-columns: minmax(0, 1fr);
+    padding-right: var(--space-2);
+    padding-left: var(--space-2);
   }
 
   .chapter-current-icon {
@@ -1119,9 +1201,9 @@ input:focus-visible {
 }
 
 @media (max-width: 360px) {
-  .app {
-    padding-right: 16px;
-    padding-left: 16px;
+  :root {
+    --reader-inline-padding: 16px;
+    --transport-gutter: 8px;
   }
 
   .chapter-title {
@@ -1129,16 +1211,14 @@ input:focus-visible {
   }
 
   .transport {
-    right: max(8px, env(safe-area-inset-right));
     bottom: max(8px, env(safe-area-inset-bottom));
-    left: max(8px, env(safe-area-inset-left));
-    padding-right: 10px;
-    padding-left: 10px;
+    padding-right: var(--space-1);
+    padding-left: var(--space-1);
   }
 
   .chapter-nav {
     grid-template-columns: 44px minmax(0, 1fr) 44px 44px;
-    gap: var(--space-1);
+    gap: 2px;
   }
 
   .chapter-nav-button,
@@ -1149,8 +1229,12 @@ input:focus-visible {
 
   .chapter-current-button {
     height: 44px;
-    padding-right: var(--space-1);
-    padding-left: var(--space-1);
+    padding-right: 2px;
+    padding-left: 2px;
+  }
+
+  .chapter-current-kicker {
+    font-size: 0.64rem;
   }
 
   .time-row {
@@ -1202,6 +1286,14 @@ function plural(count: number, singular: string, pluralForm = `${singular}s`) {
 
 function isMissingFileError(error: unknown) {
   return error instanceof Error && "code" in error && error.code === "ENOENT";
+}
+
+function errorMessage(error: unknown) {
+  return error instanceof Error ? error.message : String(error);
+}
+
+function errorStack(error: unknown) {
+  return error instanceof Error ? error.stack : undefined;
 }
 
 async function readJsonFile(path: string) {
@@ -1420,7 +1512,13 @@ async function hashFile(path: string) {
     stream.on("data", (chunk) => {
       hash.update(chunk);
     });
-    stream.on("error", rejectHash);
+    stream.on("error", (error) => {
+      if (isMissingFileError(error)) {
+        rejectHash(new Error(`Missing file to hash: ${path}`));
+        return;
+      }
+      rejectHash(error);
+    });
     stream.on("end", () => {
       resolveHash(`sha256-${hash.digest("hex")}`);
     });
@@ -1435,23 +1533,28 @@ function hashPrefix(hash: string) {
   return match[1].slice(0, 16);
 }
 
-async function audioAssetMetadata(
+async function audioAssetFileMetadata(
   path: string,
-  chapterId: z.infer<typeof ChapterIdSchema>,
   extension: "webm" | "m4a",
-  mimeType: string,
 ) {
-  const fileStats = await stat(path);
+  const [fileStats, hash] = await Promise.all([stat(path), hashFile(path)]);
   if (!fileStats.isFile() || fileStats.size <= 0) {
     throw new Error(`Audio asset is empty or missing: ${path}`);
   }
-  const hash = await hashFile(path);
+  return { extension, bytes: fileStats.size, hash };
+}
+
+function catalogAudioAsset(
+  chapterId: z.infer<typeof ChapterIdSchema>,
+  asset: Awaited<ReturnType<typeof audioAssetFileMetadata>>,
+  mimeType: string,
+) {
   return assertCatalogAudioAsset(
     CatalogAudioAssetSchema.parse({
-      url: `/${chapterId}-${hashPrefix(hash)}.${extension}`,
+      url: `/${chapterId}-${hashPrefix(asset.hash)}.${asset.extension}`,
       mimeType,
-      bytes: fileStats.size,
-      hash,
+      bytes: asset.bytes,
+      hash: asset.hash,
     }),
     chapterId,
   );
@@ -1558,12 +1661,19 @@ async function discoverChapterIds() {
   const chapterIds: Array<z.infer<typeof ChapterIdSchema>> = [];
   const skippedChapterIds: Array<z.infer<typeof ChapterIdSchema>> = [];
 
-  for (const chapterId of candidateChapterIds) {
-    if (await chapterAssetsAreComplete(chapterId)) {
+  const chapterStates = await Promise.all(
+    candidateChapterIds.map(async (chapterId) => ({
+      chapterId,
+      complete: await chapterAssetsAreComplete(chapterId),
+    })),
+  );
+
+  for (const { chapterId, complete } of chapterStates) {
+    if (complete) {
       chapterIds.push(chapterId);
-    } else {
-      skippedChapterIds.push(chapterId);
+      continue;
     }
+    skippedChapterIds.push(chapterId);
   }
 
   if (skippedChapterIds.length > 0) {
@@ -1580,25 +1690,21 @@ async function discoverChapterIds() {
 }
 
 async function removeGeneratedRoutes(chapterIds: Array<z.infer<typeof ChapterIdSchema>>) {
-  await rm(preparedChapterRoutesDir, { recursive: true, force: true });
-  await mkdir(preparedChapterRoutesDir, { recursive: true });
-
   const entries = await readdir(webRoot, { withFileTypes: true });
-  await Promise.all(
-    entries
+  await Promise.all([
+    rm(preparedChapterRoutesDir, { recursive: true, force: true }).then(() =>
+      mkdir(preparedChapterRoutesDir, { recursive: true }),
+    ),
+    ...entries
       .filter((entry) => entry.isDirectory() && ChapterIdSchema.safeParse(entry.name).success)
       .map((entry) => rm(legacyRootChapterRouteDir(ChapterIdSchema.parse(entry.name)), { recursive: true, force: true })),
-  );
-  await Promise.all(
-    chapterIds.map((chapterId) => rm(resolve(publicDir, `${chapterId}.json`), { force: true })),
-  );
-  await Promise.all(
-    chapterIds.flatMap((chapterId) => [
+    ...chapterIds.map((chapterId) => rm(resolve(publicDir, `${chapterId}.json`), { force: true })),
+    ...chapterIds.flatMap((chapterId) => [
       rm(resolve(publicDir, `${chapterId}.webm`), { force: true }),
       rm(resolve(publicDir, `${chapterId}.m4a`), { force: true }),
     ]),
-  );
-  await rm(resolve(generatedPublicDir, "app.css"), { force: true });
+    rm(resolve(generatedPublicDir, "app.css"), { force: true }),
+  ]);
 }
 
 function renderTranscript(
@@ -1861,16 +1967,16 @@ function staticChapterData(
   );
 }
 
-async function catalogAudioSources(
+function catalogAudioSources(
   chapterId: z.infer<typeof ChapterIdSchema>,
   sourceManifest: z.infer<typeof SourceManifestSchema>,
-  webmPath: string,
-  m4aPath: string,
+  webmMetadata: Awaited<ReturnType<typeof audioAssetFileMetadata>>,
+  m4aMetadata: Awaited<ReturnType<typeof audioAssetFileMetadata>>,
 ) {
-  return Promise.all([
-    audioAssetMetadata(webmPath, chapterId, "webm", sourceManifest.audio.primary.type),
-    audioAssetMetadata(m4aPath, chapterId, "m4a", sourceManifest.audio.fallback.type),
-  ]);
+  return [
+    catalogAudioAsset(chapterId, webmMetadata, sourceManifest.audio.primary.type),
+    catalogAudioAsset(chapterId, m4aMetadata, sourceManifest.audio.fallback.type),
+  ];
 }
 
 function catalogChapter(
@@ -1902,12 +2008,12 @@ async function prepareChapter(
 ) {
   const { sourceManifestPath, webmPath, m4aPath } = chapterAssetPaths(chapterId);
 
-  const [, webmSignature, m4aSignature] = await Promise.all([
+  const [, webmSignature, m4aSignature, sourceManifestHash] = await Promise.all([
     requiredFileSignature(sourceManifestPath, "generated chapter asset"),
     requiredFileSignature(webmPath, "generated chapter asset"),
     requiredFileSignature(m4aPath, "generated chapter asset"),
+    hashFile(sourceManifestPath),
   ]);
-  const sourceManifestHash = await hashFile(sourceManifestPath);
   const previousChapter = chapterIds[orderIndex - 1] ?? null;
   const nextChapter = chapterIds[orderIndex + 1] ?? null;
   const cacheKey = createPreparedChapterCacheKey({
@@ -1924,24 +2030,27 @@ async function prepareChapter(
   const cached = await readPreparedChapterCache(chapterId, cacheKey);
   if (cached) {
     await copyCachedChapterRoute(chapterId, cached.htmlPath);
-    console.log(
-      `Reused cached chapter ${chapterId}: ${cached.metadata.summary.blocks} blocks, ${
+    return {
+      catalogChapter: cached.metadata.catalogChapter,
+      statusLine: `Reused cached chapter ${chapterId}: ${cached.metadata.summary.blocks} blocks, ${
         cached.metadata.summary.cues
       } cues, ${cached.metadata.summary.duration.toFixed(2)} seconds.`,
-    );
-    return cached.metadata.catalogChapter;
+    };
   }
 
-  const sourceManifest = SourceManifestSchema.parse(await readJsonFile(sourceManifestPath));
+  const [sourceManifest, webmMetadata, m4aMetadata] = await Promise.all([
+    readJsonFile(sourceManifestPath).then((value) => SourceManifestSchema.parse(value)),
+    audioAssetFileMetadata(webmPath, "webm"),
+    audioAssetFileMetadata(m4aPath, "m4a"),
+  ]);
   if (sourceManifest.chapter !== chapterId) {
     throw new Error(`manifest chapter ${sourceManifest.chapter} does not match expected chapter ${chapterId}`);
   }
 
   const cues = validatedCues(sourceManifest);
   const chapterData = staticChapterData(sourceManifest, cues, orderIndex, chapterIds);
-  const audioSources = await catalogAudioSources(chapterId, sourceManifest, webmPath, m4aPath);
+  const audioSources = catalogAudioSources(chapterId, sourceManifest, webmMetadata, m4aMetadata);
   const html = renderChapterPage(sourceManifest, chapterData, renderTranscript(sourceManifest, cues), audioSources);
-  await writeChapterRoute(chapterId, html);
 
   const chapterCatalog = catalogChapter(chapterId, sourceManifest, audioSources);
   const summary = {
@@ -1949,37 +2058,226 @@ async function prepareChapter(
     cues: sourceManifest.cues.length,
     duration: sourceManifest.audio.duration,
   };
-  await writePreparedChapterCache(chapterId, cacheKey, html, chapterCatalog, summary);
+  await Promise.all([
+    writeChapterRoute(chapterId, html),
+    writePreparedChapterCache(chapterId, cacheKey, html, chapterCatalog, summary),
+  ]);
 
-  console.log(
-    `Prepared chapter ${chapterId}: ${sourceManifest.blocks.length} blocks, ${sourceManifest.cues.length} cues, ${sourceManifest.audio.duration.toFixed(
+  return {
+    catalogChapter: chapterCatalog,
+    statusLine: `Prepared chapter ${chapterId}: ${sourceManifest.blocks.length} blocks, ${sourceManifest.cues.length} cues, ${sourceManifest.audio.duration.toFixed(
       2,
     )} seconds.`,
+  };
+}
+
+function prepareWorkerCount(chapterCount: number) {
+  return Math.max(1, Math.min(chapterCount, Math.max(1, availableParallelism() - 1)));
+}
+
+async function handlePrepareWorkerMessage(
+  message: unknown,
+  data: z.infer<typeof PrepareChapterWorkerDataSchema>,
+) {
+  const task = PrepareChapterWorkerTaskSchema.parse(message);
+  try {
+    const result = await prepareChapter(task.chapterId, task.orderIndex, data.chapterIds, data.prepareScriptHash);
+    postMessage(
+      PrepareChapterWorkerResultSchema.parse({
+        type: "prepared-chapter",
+        taskId: task.taskId,
+        orderIndex: task.orderIndex,
+        chapterId: task.chapterId,
+        catalogChapter: result.catalogChapter,
+        statusLine: result.statusLine,
+      }),
+    );
+  } catch (error) {
+    postMessage(
+      PrepareChapterWorkerResultSchema.parse({
+        type: "prepare-chapter-error",
+        taskId: task.taskId,
+        orderIndex: task.orderIndex,
+        chapterId: task.chapterId,
+        message: errorMessage(error),
+        stack: errorStack(error),
+      }),
+    );
+  }
+}
+
+export async function runPrepareChapterWorker() {
+  await new Promise<void>((_resolveWorker, rejectWorker) => {
+    let data: z.infer<typeof PrepareChapterWorkerDataSchema> | null = null;
+
+    self.onmessage = (event: MessageEvent<unknown>) => {
+      let workerMessage: z.infer<typeof PrepareChapterWorkerMessageSchema>;
+      try {
+        workerMessage = PrepareChapterWorkerMessageSchema.parse(event.data);
+      } catch (error) {
+        rejectWorker(error);
+        return;
+      }
+
+      if (workerMessage.type === "init") {
+        data = workerMessage.data;
+        return;
+      }
+
+      if (!data) {
+        rejectWorker(new Error("Prepare chapter worker received a task before initialization"));
+        return;
+      }
+
+      handlePrepareWorkerMessage(workerMessage, data).catch(rejectWorker);
+    };
+  });
+}
+
+async function prepareChapters(
+  chapterIds: Array<z.infer<typeof ChapterIdSchema>>,
+  prepareScriptHash: string,
+) {
+  const workerCount = prepareWorkerCount(chapterIds.length);
+  console.log(`Preparing ${chapterIds.length} chapter ${plural(chapterIds.length, "route")} with ${workerCount} ${plural(workerCount, "worker thread")}.`);
+
+  if (workerCount === 1) {
+    const chapters: Array<z.infer<typeof CatalogChapterSchema>> = [];
+    for (const [orderIndex, chapterId] of chapterIds.entries()) {
+      const result = await prepareChapter(chapterId, orderIndex, chapterIds, prepareScriptHash);
+      console.log(result.statusLine);
+      chapters.push(result.catalogChapter);
+    }
+    return chapters;
+  }
+
+  return new Promise<Array<z.infer<typeof CatalogChapterSchema>>>((resolveChapters, rejectChapters) => {
+    const chapters: Array<z.infer<typeof CatalogChapterSchema> | undefined> = new Array(chapterIds.length);
+    const workers: Array<Worker> = [];
+    let nextOrderIndex = 0;
+    let completed = 0;
+    let settled = false;
+
+    const finishWithError = (error: unknown) => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      for (const worker of workers) {
+        void worker.terminate();
+      }
+      rejectChapters(error);
+    };
+
+    const assignNextChapter = (worker: Worker) => {
+      if (settled) {
+        return;
+      }
+      if (nextOrderIndex >= chapterIds.length) {
+        return;
+      }
+
+      const orderIndex = nextOrderIndex;
+      nextOrderIndex += 1;
+      worker.postMessage(
+        PrepareChapterWorkerMessageSchema.parse({
+          type: "prepare-chapter",
+          taskId: orderIndex,
+          orderIndex,
+          chapterId: chapterIds[orderIndex],
+        }),
+      );
+    };
+
+    for (let index = 0; index < workerCount; index += 1) {
+      const worker = new Worker(new URL("./prepare-worker.ts", import.meta.url), { type: "module" });
+      workers.push(worker);
+
+      worker.postMessage(
+        PrepareChapterWorkerMessageSchema.parse({
+          type: "init",
+          data: {
+            role: "prepare-chapter-worker",
+            chapterIds,
+            prepareScriptHash,
+          },
+        }),
+      );
+
+      worker.onmessage = (event: MessageEvent<unknown>) => {
+        let result: z.infer<typeof PrepareChapterWorkerResultSchema>;
+        try {
+          result = PrepareChapterWorkerResultSchema.parse(event.data);
+        } catch (error) {
+          finishWithError(error);
+          return;
+        }
+
+        if (result.type !== "prepared-chapter") {
+          finishWithError(
+            new Error(
+              `${result.type === "prepare-chapter-error" ? `Failed to prepare chapter ${result.chapterId}` : "Prepare chapter worker failed"}: ${result.message}${
+                result.stack ? `\n${result.stack}` : ""
+              }`,
+            ),
+          );
+          return;
+        }
+
+        chapters[result.orderIndex] = result.catalogChapter;
+        console.log(result.statusLine);
+        completed += 1;
+
+        if (completed === chapterIds.length) {
+          settled = true;
+          for (const activeWorker of workers) {
+            activeWorker.terminate();
+          }
+          resolveChapters(chapters.map((chapter) => CatalogChapterSchema.parse(chapter)));
+          return;
+        }
+
+        assignNextChapter(worker);
+      };
+
+      worker.onerror = (event) => {
+        finishWithError(new Error(`Prepare chapter worker failed: ${event.message}`));
+      };
+
+      assignNextChapter(worker);
+    }
+  });
+}
+
+async function main() {
+  await Promise.all([
+    mkdir(publicDir, { recursive: true }),
+    mkdir(generatedPublicDir, { recursive: true }),
+    mkdir(generatedAssetsDir, { recursive: true }),
+    mkdir(preparedChapterRoutesDir, { recursive: true }),
+    mkdir(preparedChapterCacheDir, { recursive: true }),
+  ]);
+
+  const [chapterIds, prepareScriptHash] = await Promise.all([
+    discoverChapterIds(),
+    hashFile(prepareScriptPath),
+  ]);
+
+  await Promise.all([
+    removeGeneratedRoutes(chapterIds),
+    writeFile(resolve(generatedAssetsDir, "app.css"), css.trim(), "utf8"),
+  ]);
+
+  const chapters = await prepareChapters(chapterIds, prepareScriptHash);
+
+  await writeJsonFile(
+    resolve(generatedPublicDir, "index.json"),
+    assertCatalog(CatalogSchema.parse({ schema: catalogSchema, chapters })),
   );
 
-  return chapterCatalog;
+  console.log(`Prepared ${chapters.length} chapter ${plural(chapters.length, "route")}.`);
 }
 
-await mkdir(publicDir, { recursive: true });
-await mkdir(generatedPublicDir, { recursive: true });
-await mkdir(generatedAssetsDir, { recursive: true });
-await mkdir(preparedChapterRoutesDir, { recursive: true });
-await mkdir(preparedChapterCacheDir, { recursive: true });
-
-const chapterIds = await discoverChapterIds();
-const prepareScriptHash = await hashFile(prepareScriptPath);
-
-await removeGeneratedRoutes(chapterIds);
-await writeFile(resolve(generatedAssetsDir, "app.css"), css.trim(), "utf8");
-
-const chapters: Array<z.infer<typeof CatalogChapterSchema>> = [];
-for (const [orderIndex, chapterId] of chapterIds.entries()) {
-  chapters.push(await prepareChapter(chapterId, orderIndex, chapterIds, prepareScriptHash));
+if (import.meta.main) {
+  await main();
 }
-
-await writeJsonFile(
-  resolve(generatedPublicDir, "index.json"),
-  assertCatalog(CatalogSchema.parse({ schema: catalogSchema, chapters })),
-);
-
-console.log(`Prepared ${chapters.length} chapter ${plural(chapters.length, "route")}.`);

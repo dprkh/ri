@@ -5,38 +5,6 @@ import { fileURLToPath } from "node:url";
 import { generateSW, type GenerateSWOptions } from "workbox-build";
 import { z } from "zod";
 
-const Runtime = globalThis as typeof globalThis & {
-  Bun: {
-    build(options: {
-      entrypoints: Array<string>;
-      target: "browser";
-      format: "esm";
-      minify: boolean;
-      splitting: boolean;
-      sourcemap: "none";
-      write: false;
-    }): Promise<{
-      success: boolean;
-      logs: Array<unknown>;
-      outputs: Array<{
-        path: string;
-        kind: string;
-        type: string;
-        text(): Promise<string>;
-      }>;
-    }>;
-    file(path: string): Blob;
-    serve(options: {
-      hostname: string;
-      port: number;
-      fetch(request: Request): Response | Promise<Response>;
-    }): {
-      url: URL;
-      stop(force?: boolean): void;
-    };
-  };
-};
-
 const CliOptionsSchema = z.discriminatedUnion("command", [
   z.object({ command: z.literal("build") }).strict(),
   z
@@ -166,14 +134,13 @@ function rewriteHtmlAssets(html: string, browserAssetPath: string, stylesheetAss
 }
 
 async function browserBundle(minify: boolean) {
-  const result = await Runtime.Bun.build({
+  const result = await Bun.build({
     entrypoints: [browserEntry],
     target: "browser",
     format: "esm",
     minify,
     splitting: false,
     sourcemap: "none",
-    write: false,
   });
 
   if (!result.success) {
@@ -455,7 +422,7 @@ async function fileResponse(request: Request, path: string, headers: HeadersInit
     const partialHeaders = new Headers(responseHeaders);
     partialHeaders.set("Content-Length", String(range.end - range.start + 1));
     partialHeaders.set("Content-Range", `bytes ${range.start}-${range.end}/${fileSize}`);
-    return new Response(Runtime.Bun.file(path).slice(range.start, range.end + 1), {
+    return new Response(Bun.file(path).slice(range.start, range.end + 1), {
       status: 206,
       headers: partialHeaders,
     });
@@ -466,7 +433,7 @@ async function fileResponse(request: Request, path: string, headers: HeadersInit
   }
 
   responseHeaders.set("Content-Length", String(fileSize));
-  return new Response(Runtime.Bun.file(path), {
+  return new Response(Bun.file(path), {
     headers: responseHeaders,
   });
 }
@@ -544,7 +511,7 @@ async function devResponse(request: Request) {
 
 async function startDevServer(host: string, port: number) {
   await writeServiceWorker(publicDir, resolve(publicDir, "sw.js"), ["assets/app.css", "robots.txt"]);
-  const server = Runtime.Bun.serve({
+  const server = Bun.serve({
     hostname: host,
     port,
     fetch: devResponse,
