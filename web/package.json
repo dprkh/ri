@@ -1,0 +1,27 @@
+{
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "prepare": "bun run scripts/prepare.ts",
+    "dev": "bun run prepare && bun run scripts/site.ts dev",
+    "build": "bun run prepare && tsc --noEmit && bun run scripts/site.ts build",
+    "deploy:audio": "bun run scripts/upload.ts",
+    "deploy:check": "bun run scripts/verify.ts",
+    "deploy:worker": "bun --env-file=.env run wrangler deploy",
+    "deploy": "bun run build && bun run deploy:check && bun run deploy:audio && bun run deploy:worker",
+    "test:e2e": "cucumber-js"
+  },
+  "dependencies": {
+    "lucide": "^1.14.0",
+    "scroll-into-view-if-needed": "^3.1.0",
+    "zod": "^4.1.0"
+  },
+  "devDependencies": {
+    "@cucumber/cucumber": "^12.0.0",
+    "@types/node": "^24.0.0",
+    "playwright": "^1.56.0",
+    "typescript": "^5.9.0",
+    "workbox-build": "^7.4.0",
+    "wrangler": "^4.34.0"
+  }
+}

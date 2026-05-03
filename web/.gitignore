@@ -1,0 +1,16 @@
+node_modules/
+.env
+dist/
+.wrangler/
+.tmp/
+tmp/
+playwright-report/
+test-results/
+public/chapters/
+public/assets/app.css
+public/[0-9]*.json
+public/[0-9]*.webm
+public/[0-9]*.m4a
+public/sw.js
+bun.lockb
+.DS_Store

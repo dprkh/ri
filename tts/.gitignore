@@ -1,0 +1,14 @@
+.DS_Store
+.venv/
+.hf-cache/
+__pycache__/
+out/
+tmp/
+.tmp/
+*.py[cod]
+*.wav
+*.m4a
+*.webm
+*.mp3
+*.alignment.json
+*.audio.html

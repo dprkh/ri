@@ -1,0 +1,23 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "ri-pub",
+  "main": "./src/worker.ts",
+  "compatibility_date": "2026-05-03",
+  "assets": {
+    "directory": "./dist",
+    "binding": "ASSETS",
+    "run_worker_first": ["/*.webm", "/*.m4a"]
+  },
+  "r2_buckets": [
+    {
+      "binding": "AUDIO",
+      "bucket_name": "ri-pub-audio"
+    }
+  ],
+  "routes": [
+    {
+      "pattern": "ri.pub",
+      "custom_domain": true
+    }
+  ]
+}

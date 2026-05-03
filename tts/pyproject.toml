@@ -1,0 +1,12 @@
+[project]
+name = "tts"
+version = "0.1.0"
+requires-python = ">=3.10"
+dependencies = [
+  "kokoro==0.9.4",
+  "pip>=26.1",
+  "soundfile>=0.13.1",
+]
+
+[tool.uv]
+package = false
