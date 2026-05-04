@@ -16,6 +16,12 @@ Feature: Chapter navigation
       And the chapter title is "Please go aside and scram"
       And the chapter opens without a manifest fetch
 
+    Scenario: Direct chapter URL is prepared when first opened in development
+      Given chapter 5 has not been prepared by the development server
+      When the listener opens chapter 5 directly
+      Then the browser shows chapter 5
+      And chapter 5 can be played in supported browsers
+
   Rule: Listener can choose another chapter
     Scenario: Listener sees chapter names before choosing
       Given chapter 1 is ready to listen

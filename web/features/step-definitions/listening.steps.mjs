@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import http from "node:http";
 import { spawn } from "node:child_process";
+import { rm } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
 import {
@@ -18,6 +19,8 @@ import { chromium, firefox, webkit } from "playwright";
 setDefaultTimeout(90_000);
 
 const webRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
+const preparedRoutesDir = resolve(webRoot, ".tmp", "prepared-routes-v1");
+const preparedChapterCacheDir = resolve(webRoot, ".tmp", "prepared-chapters-v1");
 const baseUrl = "http://127.0.0.1:4173";
 const catalogPath = "/chapters/index.json";
 const downloadCacheName = "ri-reader-offline-v12";
@@ -76,35 +79,18 @@ let serverOutput = "";
 let manualScrollY = 0;
 let expectedLastAvailableChapter = null;
 
-async function runCommand(command, args) {
-  return new Promise((resolveCommand, rejectCommand) => {
-    const child = spawn(command, args, {
-      cwd: webRoot,
-      env: { ...process.env, FORCE_COLOR: "0" },
-      stdio: ["ignore", "pipe", "pipe"],
-    });
-    let commandOutput = "";
-    child.stdout.on("data", (chunk) => {
-      commandOutput += chunk.toString();
-    });
-    child.stderr.on("data", (chunk) => {
-      commandOutput += chunk.toString();
-    });
-    child.on("error", rejectCommand);
-    child.on("close", (code) => {
-      if (code === 0) {
-        resolveCommand(commandOutput);
-      } else {
-        rejectCommand(new Error(`${command} ${args.join(" ")} failed with ${code}:\n${commandOutput}`));
-      }
-    });
-  });
-}
-
 async function delay(ms) {
   await new Promise((resolveDelay) => {
     setTimeout(resolveDelay, ms);
   });
+}
+
+async function forgetPreparedChapter(chapter) {
+  await Promise.all([
+    rm(resolve(preparedRoutesDir, String(chapter)), { recursive: true, force: true }),
+    rm(resolve(preparedChapterCacheDir, `${chapter}.html`), { force: true }),
+    rm(resolve(preparedChapterCacheDir, `${chapter}.json`), { force: true }),
+  ]);
 }
 
 async function waitForServer() {
@@ -602,7 +588,8 @@ async function readReaderLayout() {
       const themeColor = document.querySelector('meta[name="theme-color"]')?.getAttribute("content") ?? "";
       const htmlStyle = getComputedStyle(document.documentElement);
       const bodyStyle = getComputedStyle(document.body);
-      const transportWidthExtra = 10;
+      const configuredTransportWidthExtra = Number.parseFloat(htmlStyle.getPropertyValue("--transport-width-extra"));
+      const transportWidthExtra = Number.isFinite(configuredTransportWidthExtra) ? configuredTransportWidthExtra : 0;
 
       return {
         bodyWidthFits: document.documentElement.scrollWidth <= window.innerWidth + 1,
@@ -707,7 +694,7 @@ function assertReaderLayout(layout, viewport) {
   assert.equal(
     layout.transportExtendsBeyondArticleWidth,
     true,
-    `transport was not 10px wider than the article at ${viewport.width}px: ${JSON.stringify(layout.articleAndTransportBounds)}`,
+    `transport did not match the configured width beyond the article at ${viewport.width}px: ${JSON.stringify(layout.articleAndTransportBounds)}`,
   );
   assert.equal(layout.maxTranscriptBlockGap <= 1, true, `transcript paragraph gap was too large at ${viewport.width}px`);
   assert.equal(layout.transcriptClearsTransport, true, `transport obscured transcript at ${viewport.width}px`);
@@ -770,8 +757,7 @@ function assertChapterPickerLayout(layout, viewport) {
 }
 
 BeforeAll(async () => {
-  await runCommand("bun", ["run", "prepare"]);
-  server = spawn("bun", ["run", "scripts/site.ts", "dev", "--host", "127.0.0.1", "--port", "4173"], {
+  server = spawn("bun", ["run", "dev", "--", "--host", "127.0.0.1", "--port", "4173"], {
     cwd: webRoot,
     env: { ...process.env, FORCE_COLOR: "0" },
     stdio: ["ignore", "pipe", "pipe"],
@@ -822,6 +808,10 @@ Given("download storage has no available space", async () => {
 
 Given("chapter {int} is ready to listen", async (chapter) => {
   await openChapter(chapter);
+});
+
+Given("chapter {int} has not been prepared by the development server", async (chapter) => {
+  await forgetPreparedChapter(chapter);
 });
 
 Given("playback has already started", async () => {
@@ -891,6 +881,10 @@ When("the listener manually reviews another passage", async () => {
 });
 
 When("the listener returns to chapter {int}", async (chapter) => {
+  await openChapter(chapter);
+});
+
+When("the listener opens chapter {int} directly", async (chapter) => {
   await openChapter(chapter);
 });
 

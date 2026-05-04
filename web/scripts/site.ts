@@ -4,6 +4,7 @@ import { dirname, extname, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { generateSW, type GenerateSWOptions } from "workbox-build";
 import { z } from "zod";
+import { prepareChapterCatalog, prepareChapterRoute, prepareDevStaticAssets } from "./prepare.ts";
 
 const CliOptionsSchema = z.discriminatedUnion("command", [
   z.object({ command: z.literal("build") }).strict(),
@@ -45,6 +46,8 @@ const contentTypesByExtension = new Map([
   [".txt", "text/plain; charset=utf-8"],
   [".webm", "audio/webm"],
 ]);
+const pendingChapterPreparations = new Map<string, Promise<string>>();
+let pendingCatalogPreparation: Promise<string> | null = null;
 
 function parseCli(argv: Array<string>) {
   const command = z.enum(["build", "dev"]).parse(argv[2]);
@@ -85,6 +88,14 @@ function parseCli(argv: Array<string>) {
 
 function isMissingFileError(error: unknown) {
   return error instanceof Error && "code" in error && error.code === "ENOENT";
+}
+
+function errorMessage(error: unknown) {
+  return error instanceof Error ? error.message : String(error);
+}
+
+function isUnavailableChapterError(error: unknown) {
+  return error instanceof Error && error.message.includes("is not a complete generated audio chapter");
 }
 
 async function pathExists(path: string) {
@@ -458,6 +469,33 @@ async function htmlResponse(path: string) {
   });
 }
 
+async function preparedDevChapterPath(chapterId: string) {
+  const pendingPreparation = pendingChapterPreparations.get(chapterId);
+  if (pendingPreparation) {
+    return pendingPreparation;
+  }
+
+  const preparation = prepareChapterRoute(chapterId)
+    .then((result) => result.htmlPath)
+    .finally(() => {
+      pendingChapterPreparations.delete(chapterId);
+    });
+  pendingChapterPreparations.set(chapterId, preparation);
+  return preparation;
+}
+
+function preparedDevCatalogPath() {
+  if (!pendingCatalogPreparation) {
+    pendingCatalogPreparation = prepareChapterCatalog()
+      .then((result) => result.catalogPath)
+      .catch((error) => {
+        pendingCatalogPreparation = null;
+        throw error;
+      });
+  }
+  return pendingCatalogPreparation;
+}
+
 async function devResponse(request: Request) {
   const url = new URL(request.url);
   const pathname = url.pathname;
@@ -479,13 +517,29 @@ async function devResponse(request: Request) {
     return htmlResponse(resolve(webRoot, "index.html"));
   }
 
+  if (pathname === "/chapters/index.json") {
+    try {
+      const catalogPath = await preparedDevCatalogPath();
+      const response = await fileResponse(request, catalogPath);
+      if (response) {
+        return response;
+      }
+      return notFound("Chapter catalog has not been generated.");
+    } catch (error) {
+      return textResponse(`Unable to prepare chapter catalog: ${errorMessage(error)}`, 500);
+    }
+  }
+
   const chapterRoute = chapterRoutePattern.exec(pathname);
   if (chapterRoute) {
-    const htmlPath = chapterRouteIndexPath(chapterRoute[1]);
-    if (!(await pathExists(htmlPath))) {
-      return notFound(`Chapter ${chapterRoute[1]} has not been generated.`);
+    try {
+      return htmlResponse(await preparedDevChapterPath(chapterRoute[1]));
+    } catch (error) {
+      if (isUnavailableChapterError(error)) {
+        return notFound(errorMessage(error));
+      }
+      return textResponse(`Unable to prepare chapter ${chapterRoute[1]}: ${errorMessage(error)}`, 500);
     }
-    return htmlResponse(htmlPath);
   }
 
   const audioAssetRoute = audioAssetRoutePattern.exec(pathname);
@@ -510,6 +564,7 @@ async function devResponse(request: Request) {
 }
 
 async function startDevServer(host: string, port: number) {
+  await prepareDevStaticAssets();
   await writeServiceWorker(publicDir, resolve(publicDir, "sw.js"), ["assets/app.css", "robots.txt"]);
   const server = Bun.serve({
     hostname: host,
